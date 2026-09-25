@@ -2,19 +2,21 @@
 #
 # Runs the gcp-mcp container image with Docker, or with Apple container when Docker is not
 # installed. Arguments are passed to gcp-mcp. The Application Default Credentials file,
-# GOOGLE_APPLICATION_CREDENTIALS or else the gcloud well-known file, is mounted read-only into
-# the container. Variables come from .env in the repository root when it exists, and from
-# GOOGLE_CLOUD_PROJECT, GCLOUD_PROJECT and GOOGLE_CLOUD_QUOTA_PROJECT when they are set. IMAGE
-# overrides the image name (default: gcp-mcp:latest) and PORT the host port published on
-# 127.0.0.1 (default: 8889).
+# GOOGLE_APPLICATION_CREDENTIALS or else the gcloud well-known file in CLOUDSDK_CONFIG or the
+# gcloud default configuration directory, is mounted read-only into the container, and so is the
+# file named by CLOUDSDK_AUTH_ACCESS_TOKEN_FILE. Variables come from .env in the repository root
+# when it exists, and from CLOUDSDK_AUTH_ACCESS_TOKEN, GOOGLE_CLOUD_PROJECT, GCLOUD_PROJECT and
+# GOOGLE_CLOUD_QUOTA_PROJECT when they are set. IMAGE overrides the image name (default:
+# gcp-mcp:latest) and PORT the host port published on 127.0.0.1 (default: 8889).
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 image="${IMAGE:-gcp-mcp:latest}"
 port="${PORT:-8889}"
-credentials="${GOOGLE_APPLICATION_CREDENTIALS:-${HOME}/.config/gcloud/application_default_credentials.json}"
+credentials="${GOOGLE_APPLICATION_CREDENTIALS:-${CLOUDSDK_CONFIG:-${HOME}/.config/gcloud}/application_default_credentials.json}"
 target=/var/run/gcp/credentials.json
+token_target=/var/run/gcp/access_token
 
 run_args=(run --rm -i -p "127.0.0.1:${port}:8889")
 if [[ -f .env ]]; then
@@ -23,7 +25,10 @@ fi
 if [[ -f "${credentials}" ]]; then
     run_args+=(--mount "type=bind,source=${credentials},target=${target},readonly" -e "GOOGLE_APPLICATION_CREDENTIALS=${target}")
 fi
-for name in GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT GOOGLE_CLOUD_QUOTA_PROJECT; do
+if [[ -f "${CLOUDSDK_AUTH_ACCESS_TOKEN_FILE:-}" ]]; then
+    run_args+=(--mount "type=bind,source=${CLOUDSDK_AUTH_ACCESS_TOKEN_FILE},target=${token_target},readonly" -e "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=${token_target}")
+fi
+for name in CLOUDSDK_AUTH_ACCESS_TOKEN GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT GOOGLE_CLOUD_QUOTA_PROJECT; do
     if [[ -n "${!name:-}" ]]; then
         run_args+=(-e "${name}")
     fi

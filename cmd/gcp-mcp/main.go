@@ -43,9 +43,16 @@ Service Controls perimeters and access levels, project IAM policies and project 
 
 Every tool call reaches whatever the authenticated identity is authorized for in Google Cloud.
 
-Authentication with --auth adc uses the Application Default Credentials, first match wins:
+Authentication with --auth auto uses an access token as the Google Cloud CLI does, first match
+wins, and otherwise the Application Default Credentials:
+  CLOUDSDK_AUTH_ACCESS_TOKEN        access token
+  CLOUDSDK_AUTH_ACCESS_TOKEN_FILE   file holding an access token, read for every request
+
+The Application Default Credentials, used by --auth adc, are the first source found:
   GOOGLE_APPLICATION_CREDENTIALS    credentials file
-  gcloud well-known file            gcloud auth application-default login
+  gcloud well-known file            application_default_credentials.json in CLOUDSDK_CONFIG, or
+                                    in the gcloud default configuration directory when it is
+                                    unset, written by gcloud auth application-default login
   metadata server                   the attached service account on Google Cloud
 
 The project gcp_query_cloud_logging searches when a call names none is GOOGLE_CLOUD_PROJECT,
@@ -54,9 +61,10 @@ project. GOOGLE_CLOUD_QUOTA_PROJECT overrides the credentials' quota project.
 
 Flags:
       --transport <name>     MCP transport: http (Streamable HTTP) or stdio (default: http)
-      --auth <method>        authentication: adc (Application Default Credentials), or none
-                             (no credential of the server's own; the MCP client sends an
-                             Authorization header) (default: adc)
+      --auth <method>        authentication: auto (access token when set, otherwise Application
+                             Default Credentials), access-token, adc, or none (no credential
+                             of the server's own; the MCP client sends an Authorization
+                             header) (default: auto)
       --host <address>       address the HTTP server binds to (default: 127.0.0.1)
       --port <port>          port the HTTP server listens on (default: 8889)
       --path <path>          URL path of the MCP endpoint (default: /mcp)
@@ -121,7 +129,7 @@ func parseFlags() options {
 	}
 
 	flags.StringVar(&opts.transport, "transport", "http", "")
-	flags.StringVar(&opts.auth, "auth", gcp.AuthADC, "")
+	flags.StringVar(&opts.auth, "auth", gcp.AuthAuto, "")
 	flags.StringVar(&opts.host, "host", "127.0.0.1", "")
 	flags.IntVar(&opts.port, "port", 8889, "")
 	flags.StringVar(&opts.path, "path", "/mcp", "")

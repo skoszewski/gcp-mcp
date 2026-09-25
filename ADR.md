@@ -95,3 +95,31 @@ their default ports differ so both can run on one host.
 **Consequence:** The container scripts mount the credentials file with
 `--mount type=bind,source=...,target=...,readonly`, a form both Docker and Apple `container`
 accept.
+
+## ADR-009: CLOUDSDK_CONFIG locates the gcloud well-known file
+
+**Decision:** When `GOOGLE_APPLICATION_CREDENTIALS` is unset and `CLOUDSDK_CONFIG` is set, the
+server reads `application_default_credentials.json` from the `CLOUDSDK_CONFIG` directory, and
+without that file falls back to the metadata server only. Otherwise it uses
+`google.FindDefaultCredentials`.
+
+**Reason:** `golang.org/x/oauth2/google` looks for the well-known file only in `~/.config/gcloud`
+or `%APPDATA%\gcloud`, while google-auth and the Google Cloud CLI take the configuration
+directory from `CLOUDSDK_CONFIG`. Tools such as cloud-select switch gcloud profiles by setting
+it, so ignoring it would authenticate as another profile's identity, and take the default
+project from the selected profile but the credentials from another.
+
+## ADR-010: Access token from the Google Cloud CLI variables
+
+**Decision:** `--auth auto`, the default, uses `CLOUDSDK_AUTH_ACCESS_TOKEN`, then the file named
+by `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`, and the Application Default Credentials only when neither
+is set. `--auth access-token` and `--auth adc` force one method. The token is not refreshed; the
+file is read for every request. The `auth/access_token_file` property in a gcloud configuration
+file is not read.
+
+**Reason:** The Google Cloud CLI gives these two variables precedence over every other credential
+(`googlecloudsdk/core/credentials/store.py`), so an environment prepared for `gcloud` with a
+token authenticates the server as the same identity. A token has no refresh credential, so a
+long-running server can only pick up a new one by rereading its file. Reading gcloud
+configuration files would mean reimplementing gcloud's property resolution for one property,
+whose environment variable form is already supported.

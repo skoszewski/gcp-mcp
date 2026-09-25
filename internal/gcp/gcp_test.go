@@ -8,10 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"cloud.google.com/go/compute/metadata"
 )
 
 // staticAuthorizer authorizes every request with a fixed bearer token and quota project.
@@ -248,6 +252,73 @@ func TestProjectIAMBindingsCache(t *testing.T) {
 	}
 	if len(*requests) != 2 {
 		t.Errorf("bindings reused across credentials: %d requests", len(*requests))
+	}
+}
+
+func TestNewAuthorizerCloudSDKConfig(t *testing.T) {
+	configDir := t.TempDir()
+	file := `{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","quota_project_id":"quota"}`
+	if err := os.WriteFile(filepath.Join(configDir, wellKnownFile), []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"CLOUDSDK_CONFIG": configDir, "GOOGLE_CLOUD_PROJECT": "p"}
+	authorizer, err := NewAuthorizer(context.Background(), AuthADC, func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adc := authorizer.(*adcAuthorizer)
+	if adc.method != "Application Default Credentials (authorized_user)" || adc.quotaProject != "quota" || adc.project != "p" {
+		t.Errorf("authorizer = %+v", adc)
+	}
+
+	env["CLOUDSDK_CONFIG"] = configDir + "/missing"
+	if !metadata.OnGCE() {
+		if _, err := NewAuthorizer(context.Background(), AuthADC, func(name string) string { return env[name] }); err == nil {
+			t.Error("CLOUDSDK_CONFIG without a credentials file: expected an error")
+		}
+	}
+}
+
+func TestNewAuthorizerAccessToken(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"CLOUDSDK_AUTH_ACCESS_TOKEN": " value-token\n", "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE": tokenFile,
+		"GOOGLE_CLOUD_PROJECT": "p", "GOOGLE_CLOUD_QUOTA_PROJECT": "quota",
+	}
+	getenv := func(name string) string { return env[name] }
+	authorize := func(method string) (string, string) {
+		t.Helper()
+		authorizer, err := NewAuthorizer(context.Background(), method, getenv)
+		if err != nil {
+			t.Fatalf("NewAuthorizer(%s): %v", method, err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://example.com", nil)
+		if err := authorizer.Authorize(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		return request.Header.Get("Authorization"), request.Header.Get(quotaProjectHeader)
+	}
+
+	if header, quota := authorize(AuthAuto); header != "Bearer value-token" || quota != "quota" {
+		t.Errorf("token value: %q, %q", header, quota)
+	}
+	delete(env, "CLOUDSDK_AUTH_ACCESS_TOKEN")
+	if header, _ := authorize(AuthAccessToken); header != "Bearer file-token" {
+		t.Errorf("token file: %q", header)
+	}
+	if err := os.WriteFile(tokenFile, []byte("rotated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if header, _ := authorize(AuthAuto); header != "Bearer rotated" {
+		t.Errorf("rotated token file: %q", header)
+	}
+
+	delete(env, "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")
+	if _, err := NewAuthorizer(context.Background(), AuthAccessToken, getenv); err == nil {
+		t.Error("--auth access-token without a token: expected an error")
 	}
 }
 

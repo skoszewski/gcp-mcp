@@ -29,15 +29,33 @@ instead of failing the call.
 
 ## Authentication
 
-With the default `--auth adc`, the server uses the Application Default Credentials, the first
-source found:
+With the default `--auth auto`, the server uses the first configured of:
+
+1. `CLOUDSDK_AUTH_ACCESS_TOKEN` - an OAuth access token.
+2. `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` - a file holding an OAuth access token.
+3. The Application Default Credentials.
+
+The two access token variables are the ones the Google Cloud CLI reads, with the same
+precedence, and override every other credential. A token is used as given and never refreshed,
+so it stops working when it expires, typically after an hour. The token file is read again for
+every request, so writing a new token to it replaces the old one without restarting the server,
+e.g. `gcloud auth print-access-token > token`. The `auth/access_token_file` property of a gcloud
+configuration is not read.
+
+The Application Default Credentials are the first source found:
 
 1. The file named by `GOOGLE_APPLICATION_CREDENTIALS`.
-2. The gcloud well-known file written by `gcloud auth application-default login`.
+2. The gcloud well-known file `application_default_credentials.json`, written by
+   `gcloud auth application-default login` to the gcloud configuration directory: the directory
+   named by `CLOUDSDK_CONFIG` when it is set, otherwise `~/.config/gcloud`, or
+   `%APPDATA%\gcloud` on Windows.
 3. The metadata server, when the server runs on Google Cloud.
 
-The server fails at startup when none is found. `--auth none` configures no credential; every
-call then needs an `Authorization` header from the MCP client, described below.
+The server fails at startup when none is found.
+
+`--auth access-token` and `--auth adc` force one method; `--auth access-token` fails at startup
+when neither access token variable is set. `--auth none` configures no credential; every call
+then needs an `Authorization` header from the MCP client, described below.
 
 The identity needs these permissions on the resources it reads:
 
@@ -51,7 +69,7 @@ The identity needs these permissions on the resources it reads:
 With user credentials, Google Cloud charges the Resource Manager and Access Context Manager
 calls to a quota project. The server sends the credentials file's `quota_project_id`, which
 `gcloud auth application-default set-quota-project` sets, or `GOOGLE_CLOUD_QUOTA_PROJECT`
-when it is set.
+when it is set. With an access token, only `GOOGLE_CLOUD_QUOTA_PROJECT` sets it.
 
 ### Default project
 
@@ -61,7 +79,7 @@ when it is set.
 2. `GCLOUD_PROJECT`.
 3. The project of the credentials: a service account key's `project_id`, or the metadata
    server's project.
-4. For user credentials, the project configured in the Google Cloud CLI
+4. For an access token or user credentials, the project configured in the Google Cloud CLI
    (`gcloud config get-value project`), when the CLI is installed.
 
 The project in use is logged at startup. Without one, every `gcp_query_cloud_logging` call has to
@@ -170,10 +188,11 @@ scripts/run_container.sh --transport stdio
 `scripts/build_container.sh` builds the `gcp-mcp:latest` image for the host's architecture;
 `ARCH` set to `amd64`, `arm64` or `amd64,arm64` selects others. `scripts/run_container.sh`
 publishes the server on `127.0.0.1:8889` and passes its arguments to `gcp-mcp`. It mounts the
-file named by `GOOGLE_APPLICATION_CREDENTIALS`, or else the gcloud well-known file, read-only into
-the container, passes the variables in the `.env` file in the repository root when that file
-exists, and passes `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT` and `GOOGLE_CLOUD_QUOTA_PROJECT` when
-they are set in the calling shell. `IMAGE` overrides the image name (`gcp-mcp:latest`) and `PORT`
+file named by `GOOGLE_APPLICATION_CREDENTIALS`, or else the gcloud well-known file, found in
+`CLOUDSDK_CONFIG` when it is set, read-only into the container, and likewise the file named by
+`CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`. It passes the variables in the `.env` file in the repository
+root when that file exists, and `CLOUDSDK_AUTH_ACCESS_TOKEN`, `GOOGLE_CLOUD_PROJECT`,
+`GCLOUD_PROJECT` and `GOOGLE_CLOUD_QUOTA_PROJECT` when they are set in the calling shell. `IMAGE` overrides the image name (`gcp-mcp:latest`) and `PORT`
 the host port.
 
 PowerShell 7 scripts do the same on any platform, with Docker as the container runtime:
@@ -192,7 +211,7 @@ scripts/run_container.ps1
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--transport` | `http` | `http` (Streamable HTTP) or `stdio` |
-| `--auth` | `adc` | `adc` or `none`; see Authentication |
+| `--auth` | `auto` | `auto`, `access-token`, `adc` or `none`; see Authentication |
 | `--host` | `127.0.0.1` | Address the HTTP server binds to; the container image sets `0.0.0.0` |
 | `--port` | `8889` | HTTP port |
 | `--path` | `/mcp` | HTTP path of the MCP endpoint |
