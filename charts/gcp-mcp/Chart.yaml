@@ -1,0 +1,5 @@
+apiVersion: v2
+name: gcp-mcp
+description: MCP server with read-only access to Google Cloud audit logs, VPC Service Controls policies, project IAM policies and project identifiers
+type: application
+version: 0.1.0

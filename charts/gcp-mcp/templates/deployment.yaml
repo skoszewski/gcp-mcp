@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      {{- with .Values.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      containers:
+        - name: gcp-mcp
+          image: {{ .Values.image }}
+          args: ["--port", "{{ .Values.port }}"]
+          env:
+            {{- with .Values.project }}
+            - name: GOOGLE_CLOUD_PROJECT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.credentialsSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/run/gcp/credentials.json
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.port }}
+          {{- if .Values.credentialsSecret }}
+          volumeMounts:
+            - name: credentials
+              mountPath: /var/run/gcp
+              readOnly: true
+          {{- end }}
+      {{- if .Values.credentialsSecret }}
+      volumes:
+        - name: credentials
+          secret:
+            secretName: {{ .Values.credentialsSecret }}
+      {{- end }}

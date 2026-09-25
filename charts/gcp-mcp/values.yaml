@@ -1,0 +1,17 @@
+image: gcp-mcp:latest
+
+# Kubernetes service account the pod runs as, e.g. one bound to a Google service account through
+# Workload Identity Federation for GKE; empty for the namespace's default service account.
+serviceAccountName: ""
+
+# Secret holding an Application Default Credentials file under the key credentials.json; empty
+# to take credentials from the metadata server.
+credentialsSecret: ""
+
+# Project gcp_query_cloud_logging searches when a call names none; empty for the credentials'
+# own project.
+project: ""
+
+port: 8889
+
+serviceType: LoadBalancer

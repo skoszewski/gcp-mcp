@@ -1,0 +1,7 @@
+.git
+.env
+.claude
+tmp
+bin
+*.md
+scripts
