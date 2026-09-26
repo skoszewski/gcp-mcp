@@ -16,11 +16,12 @@ an MCP structured result is an object, where the Python function returns a bare 
 
 ## ADR-002: Google Cloud REST APIs over net/http
 
-**Decision:** The server calls the Cloud Logging v2, Access Context Manager v1 and Cloud Resource
-Manager v1 and v3 REST APIs with `net/http`. Access tokens come from `golang.org/x/oauth2/google`,
-which resolves the Application Default Credentials.
+**Decision:** The server calls the Cloud Logging v2, Access Context Manager v1, Cloud Resource
+Manager v1 and v3, IAM v1, Policy Troubleshooter v3, Organization Policy v2 and Cloud Asset v1
+REST APIs with `net/http`. Access tokens come from `golang.org/x/oauth2/google`, which resolves
+the Application Default Credentials.
 
-**Reason:** The server makes five kinds of request, and the generated clients in
+**Reason:** Each tool makes one or two plain GET or POST requests, and the generated clients in
 `google.golang.org/api` or `cloud.google.com/go/logging` would add a large dependency tree for
 them. Resolving the Application Default Credentials and refreshing their tokens is not something
 to reimplement.
@@ -54,8 +55,8 @@ credentials' own project.
 
 ## ADR-005: IAM bindings cached for five minutes per credential
 
-**Decision:** `gcp_get_iam_policy` and `gcp_get_iam_roles_for_member` share a project's bindings
-for five minutes, keyed by project and by the `Authorization` header of the MCP request.
+**Decision:** `gcp_get_iam_policy` and `gcp_get_iam_roles_for_member` share a resource's bindings
+for five minutes, keyed by resource and by the `Authorization` header of the MCP request.
 
 **Reason:** An investigation typically calls both for the same project, and Cloud Resource
 Manager has a shared read quota. The Python server caches the bindings for the life of the
@@ -123,3 +124,26 @@ token authenticates the server as the same identity. A token has no refresh cred
 long-running server can only pick up a new one by rereading its file. Reading gcloud
 configuration files would mean reimplementing gcloud's property resolution for one property,
 whose environment variable form is already supported.
+
+## ADR-011: Lookup tools beyond the Python port
+
+**Decision:** The server adds tools that the Python server does not have. They cover roles,
+project ancestry, Policy Troubleshooter, service accounts, access policies and perimeter
+listings, effective organization policies, Cloud Asset IAM policy search, and organization,
+folder and project listings. `gcp_get_iam_policy` and `gcp_get_iam_roles_for_member` also accept
+`folders/<id>` and `organizations/<id>`, and a bare value is still a project ID. Project policies
+are read with Resource Manager v1, as before, and folder and organization policies with v3,
+because v1 has no folder method.
+
+**Reason:** The ported tools cannot explain inherited bindings, group membership, deny
+policies, custom role contents, organization policy constraints, or which perimeter protects a
+project before a violation names one, and investigations stalled at those points. Existing
+arguments keep their meaning, so clients written against the Python server still work.
+
+**Consequence:** ADR-001 holds for the ported tools only. `gcp_troubleshoot_iam_permission` drops
+the raw policy of each explained allow policy and the bindings whose role does not include the
+permission, because those cannot grant it and account for most of the response.
+`gcp_get_service_account` looks the account up with the `projects/-` wildcard, for which the IAM
+API documents that a missing account can answer 403 instead of 404. It then reads the account's
+own policy under the name returned. The list and search tools read every page, as
+`gcp_query_cloud_logging` does.

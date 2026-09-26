@@ -1,5 +1,6 @@
-// Command gcp-mcp serves Google Cloud audit logs, VPC Service Controls policies, project IAM
-// policies and project identifiers as MCP tools, over Streamable HTTP or stdio.
+// Command gcp-mcp serves Google Cloud audit logs, VPC Service Controls policies, the resource
+// hierarchy, IAM policies, roles and service accounts, and organization policies as MCP tools,
+// over Streamable HTTP or stdio.
 package main
 
 import (
@@ -39,7 +40,8 @@ const (
 const usageText = `Usage: gcp-mcp [flags]
 
 Run an MCP server exposing read-only Google Cloud investigation tools -- Cloud Audit Logs, VPC
-Service Controls perimeters and access levels, project IAM policies and project identifiers.
+Service Controls access policies, perimeters and access levels, the organization, folder and
+project hierarchy, IAM policies, roles and service accounts, and organization policies.
 
 Every tool call reaches whatever the authenticated identity is authorized for in Google Cloud.
 

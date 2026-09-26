@@ -1,5 +1,6 @@
-// Package gcp reads Google Cloud audit logs, VPC Service Controls policies, project IAM
-// policies and project identifiers over their REST APIs.
+// Package gcp reads Google Cloud audit logs, VPC Service Controls policies, the resource
+// hierarchy, IAM policies, roles and service accounts, and organization policies over their REST
+// APIs.
 package gcp
 
 import (
@@ -22,6 +23,10 @@ const (
 	resourceManagerV1URL    = "https://cloudresourcemanager.googleapis.com/v1"
 	resourceManagerV3URL    = "https://cloudresourcemanager.googleapis.com/v3"
 	accessContextManagerURL = "https://accesscontextmanager.googleapis.com/v1"
+	iamURL                  = "https://iam.googleapis.com/v1"
+	policyTroubleshooterURL = "https://policytroubleshooter.googleapis.com/v3"
+	orgPolicyURL            = "https://orgpolicy.googleapis.com/v2"
+	cloudAssetURL           = "https://cloudasset.googleapis.com/v1"
 )
 
 const maxRetries = 3
@@ -153,4 +158,40 @@ func (c *Client) do(ctx context.Context, method, requestURL string, body, out an
 		return fmt.Errorf("response from %s is not the expected JSON: %w", requestURL, err)
 	}
 	return nil
+}
+
+// listAll returns the items under field of every page a GET list or search method answers with
+// for query, following the page token to the last page.
+func listAll[T any](ctx context.Context, c *Client, requestURL string, query url.Values, field string) ([]T, error) {
+	if query == nil {
+		query = url.Values{}
+	}
+	items := []T{}
+	for {
+		pageURL := requestURL
+		if encoded := query.Encode(); encoded != "" {
+			pageURL += "?" + encoded
+		}
+		var page map[string]json.RawMessage
+		if err := c.do(ctx, http.MethodGet, pageURL, nil, &page); err != nil {
+			return nil, err
+		}
+		if raw, found := page[field]; found {
+			var pageItems []T
+			if err := json.Unmarshal(raw, &pageItems); err != nil {
+				return nil, fmt.Errorf("response from %s is not the expected JSON: %w", pageURL, err)
+			}
+			items = append(items, pageItems...)
+		}
+		var token string
+		if raw, found := page["nextPageToken"]; found {
+			if err := json.Unmarshal(raw, &token); err != nil {
+				return nil, fmt.Errorf("response from %s is not the expected JSON: %w", pageURL, err)
+			}
+		}
+		if token == "" {
+			return items, nil
+		}
+		query.Set("pageToken", token)
+	}
 }

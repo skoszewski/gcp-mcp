@@ -37,7 +37,37 @@ func Register(server *mcp.Server, client *gcp.Client) []string {
 		addTool(server, "gcp_get_iam_policy", getIAMPolicyDescription, h.getIAMPolicy),
 		addTool(server, "gcp_get_iam_roles_for_member", getIAMRolesForMemberDescription, h.getIAMRolesForMember),
 		addTool(server, "gcp_resolve_project_identifiers", resolveProjectIdentifiersDescription, h.resolveProjectIdentifiers),
+		addTool(server, "gcp_get_role", getRoleDescription, h.getRole),
+		addTool(server, "gcp_get_project_ancestry", getProjectAncestryDescription, h.getProjectAncestry),
+		addTool(server, "gcp_troubleshoot_iam_permission", troubleshootIAMPermissionDescription, h.troubleshootIAMPermission),
+		addTool(server, "gcp_get_service_account", getServiceAccountDescription, h.getServiceAccount),
+		addTool(server, "gcp_list_access_policies", listAccessPoliciesDescription, h.listAccessPolicies),
+		addTool(server, "gcp_list_service_perimeters", listServicePerimetersDescription, h.listServicePerimeters),
+		addTool(server, "gcp_get_effective_org_policy", getEffectiveOrgPolicyDescription, h.getEffectiveOrgPolicy),
+		addTool(server, "gcp_search_iam_policies", searchIAMPoliciesDescription, h.searchIAMPolicies),
+		addTool(server, "gcp_list_organizations", listOrganizationsDescription, h.listOrganizations),
+		addTool(server, "gcp_list_folders", listFoldersDescription, h.listFolders),
+		addTool(server, "gcp_list_projects", listProjectsDescription, h.listProjects),
 	}
+}
+
+// hierarchyName returns a project, folder or organization argument as a resource name, taking a
+// value without a slash as a project ID or number.
+func hierarchyName(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "/") {
+		return "projects/" + value
+	}
+	return value
+}
+
+// principalEmail returns an IAM member without its user: or serviceAccount: type prefix.
+func principalEmail(member string) string {
+	member = strings.TrimSpace(member)
+	for _, prefix := range []string{"user:", "serviceAccount:"} {
+		member = strings.TrimPrefix(member, prefix)
+	}
+	return member
 }
 
 // addTool registers handler as the tool name, with the input schema inferred from In. An
@@ -227,9 +257,9 @@ func (h *handlers) getAccessLevel(ctx context.Context, in getAccessLevelInput) (
 	return output, nil
 }
 
-// resourceArg is the project argument of the IAM tools.
+// resourceArg is the project, folder or organization argument of the IAM tools.
 type resourceArg struct {
-	Resource string `json:"resource" jsonschema:"GCP project ID, e.g. \"my-project\" (project-level IAM policy only)."`
+	Resource string `json:"resource" jsonschema:"GCP project ID, e.g. \"my-project\", or \"folders/<id>\" or \"organizations/<id>\" for a policy higher in the resource hierarchy (gcp_get_project_ancestry lists a project's folders and organization)."`
 }
 
 type getIAMPolicyOutput struct {
@@ -237,7 +267,7 @@ type getIAMPolicyOutput struct {
 }
 
 func (h *handlers) getIAMPolicy(ctx context.Context, in resourceArg) (getIAMPolicyOutput, error) {
-	bindings, err := h.client.ProjectIAMBindings(ctx, in.Resource)
+	bindings, err := h.client.IAMBindings(ctx, hierarchyName(in.Resource))
 	if err != nil {
 		return getIAMPolicyOutput{}, err
 	}
@@ -264,7 +294,7 @@ type getIAMRolesForMemberOutput struct {
 }
 
 func (h *handlers) getIAMRolesForMember(ctx context.Context, in getIAMRolesForMemberInput) (getIAMRolesForMemberOutput, error) {
-	bindings, err := h.client.ProjectIAMBindings(ctx, in.Resource)
+	bindings, err := h.client.IAMBindings(ctx, hierarchyName(in.Resource))
 	if err != nil {
 		return getIAMRolesForMemberOutput{}, err
 	}
@@ -314,6 +344,412 @@ func (h *handlers) resolveProjectIdentifiers(ctx context.Context, in resolveProj
 		number := project.ProjectNumber()
 		output.Projects = append(output.Projects, projectSummary{
 			Requested: name, ProjectID: project.ProjectID, ProjectNumber: &number, DisplayName: project.DisplayName,
+		})
+	}
+	return output, nil
+}
+
+type getRoleInput struct {
+	Role string `json:"role" jsonschema:"role name as it appears in an IAM binding: \"roles/<name>\" for a predefined role, \"projects/<id>/roles/<name>\" or \"organizations/<id>/roles/<name>\" for a custom role. A bare name is taken as a predefined role and prefixed with \"roles/\"."`
+}
+
+type getRoleOutput struct {
+	Name                *string  `json:"name"`
+	Title               *string  `json:"title"`
+	Description         *string  `json:"description"`
+	Stage               *string  `json:"stage"`
+	Deleted             bool     `json:"deleted"`
+	IncludedPermissions []string `json:"included_permissions"`
+}
+
+func (h *handlers) getRole(ctx context.Context, in getRoleInput) (getRoleOutput, error) {
+	name := strings.TrimSpace(in.Role)
+	if !strings.Contains(name, "/") {
+		name = "roles/" + name
+	}
+	role, err := h.client.Role(ctx, name)
+	if err != nil {
+		return getRoleOutput{}, err
+	}
+	return getRoleOutput{
+		Name: role.Name, Title: role.Title, Description: role.Description, Stage: role.Stage, Deleted: role.Deleted,
+		IncludedPermissions: orEmpty(role.IncludedPermissions),
+	}, nil
+}
+
+type getProjectAncestryInput struct {
+	Project string `json:"project" jsonschema:"GCP project ID (e.g. \"my-project\") or project number."`
+}
+
+type getProjectAncestryOutput struct {
+	Ancestors []gcp.ResourceID `json:"ancestors"`
+}
+
+func (h *handlers) getProjectAncestry(ctx context.Context, in getProjectAncestryInput) (getProjectAncestryOutput, error) {
+	ancestry, err := h.client.ProjectAncestry(ctx, strings.TrimPrefix(strings.TrimSpace(in.Project), "projects/"))
+	if err != nil {
+		return getProjectAncestryOutput{}, err
+	}
+	return getProjectAncestryOutput{Ancestors: ancestry}, nil
+}
+
+type troubleshootIAMPermissionInput struct {
+	Principal  string `json:"principal" jsonschema:"email of the user or service account to check, e.g. \"sa-name@my-project.iam.gserviceaccount.com\"; a \"user:\" or \"serviceAccount:\" prefix is removed. Groups, domains and workforce or workload identities are not supported."`
+	Resource   string `json:"resource" jsonschema:"full resource name the permission is checked on, e.g. \"//storage.googleapis.com/projects/_/buckets/my-bucket\" -- an audit log entry's protoPayload.resourceName is often the part after the service host. A bare project ID is taken as \"//cloudresourcemanager.googleapis.com/projects/<id>\"."`
+	Permission string `json:"permission" jsonschema:"the IAM permission, e.g. \"storage.objects.get\" -- found in an audit log entry's protoPayload.authorizationInfo[].permission."`
+}
+
+type allowPolicySummary struct {
+	FullResourceName *string                       `json:"full_resource_name"`
+	AllowAccessState *string                       `json:"allow_access_state"`
+	Relevance        *string                       `json:"relevance"`
+	Bindings         []gcp.AllowBindingExplanation `json:"bindings"`
+}
+
+type troubleshootIAMPermissionOutput struct {
+	OverallAccessState    *string              `json:"overall_access_state"`
+	AllowAccessState      *string              `json:"allow_access_state"`
+	AllowPolicies         []allowPolicySummary `json:"allow_policies"`
+	DenyPolicyExplanation any                  `json:"deny_policy_explanation"`
+}
+
+func (h *handlers) troubleshootIAMPermission(ctx context.Context, in troubleshootIAMPermissionInput) (troubleshootIAMPermissionOutput, error) {
+	resource := strings.TrimSpace(in.Resource)
+	if !strings.Contains(resource, "/") {
+		resource = "//cloudresourcemanager.googleapis.com/projects/" + resource
+	}
+	result, err := h.client.TroubleshootIAM(ctx, gcp.AccessTuple{
+		Principal: principalEmail(in.Principal), FullResourceName: resource, Permission: strings.TrimSpace(in.Permission),
+	})
+	if err != nil {
+		return troubleshootIAMPermissionOutput{}, err
+	}
+
+	output := troubleshootIAMPermissionOutput{
+		OverallAccessState: result.OverallAccessState, AllowPolicies: []allowPolicySummary{},
+		DenyPolicyExplanation: result.DenyPolicyExplanation,
+	}
+	if result.AllowPolicyExplanation == nil {
+		return output, nil
+	}
+	output.AllowAccessState = result.AllowPolicyExplanation.AllowAccessState
+	for _, policy := range result.AllowPolicyExplanation.ExplainedPolicies {
+		summary := allowPolicySummary{
+			FullResourceName: policy.FullResourceName, AllowAccessState: policy.AllowAccessState, Relevance: policy.Relevance,
+			Bindings: []gcp.AllowBindingExplanation{},
+		}
+		// Bindings whose role lacks the permission cannot grant it and are left out.
+		for _, binding := range policy.BindingExplanations {
+			if binding.RolePermission == nil || *binding.RolePermission != "ROLE_PERMISSION_NOT_INCLUDED" {
+				summary.Bindings = append(summary.Bindings, binding)
+			}
+		}
+		output.AllowPolicies = append(output.AllowPolicies, summary)
+	}
+	return output, nil
+}
+
+type getServiceAccountInput struct {
+	ServiceAccount string `json:"service_account" jsonschema:"the service account's email, or its numeric unique ID as audit logs sometimes give it; a \"serviceAccount:\" prefix is removed. A full \"projects/<id>/serviceAccounts/<email or unique ID>\" name is also accepted."`
+}
+
+type getServiceAccountOutput struct {
+	Name           string        `json:"name"`
+	Email          *string       `json:"email"`
+	UniqueID       *string       `json:"unique_id"`
+	ProjectID      *string       `json:"project_id"`
+	DisplayName    *string       `json:"display_name"`
+	Description    *string       `json:"description"`
+	OAuth2ClientID *string       `json:"oauth2_client_id"`
+	Disabled       bool          `json:"disabled"`
+	IAMBindings    []gcp.Binding `json:"iam_bindings"`
+	IAMPolicyError string        `json:"iam_policy_error,omitempty"`
+}
+
+func (h *handlers) getServiceAccount(ctx context.Context, in getServiceAccountInput) (getServiceAccountOutput, error) {
+	name := principalEmail(in.ServiceAccount)
+	if !strings.Contains(name, "/") {
+		name = "projects/-/serviceAccounts/" + name
+	}
+	account, err := h.client.ServiceAccount(ctx, name)
+	if err != nil {
+		return getServiceAccountOutput{}, err
+	}
+	output := getServiceAccountOutput{
+		Name: account.Name, Email: account.Email, UniqueID: account.UniqueID, ProjectID: account.ProjectID,
+		DisplayName: account.DisplayName, Description: account.Description, OAuth2ClientID: account.OAuth2ClientID,
+		Disabled: account.Disabled, IAMBindings: []gcp.Binding{},
+	}
+	bindings, err := h.client.ServiceAccountIAMBindings(ctx, account.Name)
+	if err != nil {
+		output.IAMPolicyError = err.Error()
+		return output, nil
+	}
+	for _, binding := range bindings {
+		binding.Members = orEmpty(binding.Members)
+		output.IAMBindings = append(output.IAMBindings, binding)
+	}
+	return output, nil
+}
+
+type listAccessPoliciesInput struct {
+	Organization string `json:"organization" jsonschema:"organization ID, e.g. \"123456789012\", or \"organizations/<id>\" -- gcp_get_project_ancestry or gcp_list_organizations finds it."`
+}
+
+type accessPolicySummary struct {
+	Name   string   `json:"name"`
+	Title  *string  `json:"title"`
+	Parent *string  `json:"parent"`
+	Scopes []string `json:"scopes"`
+}
+
+type listAccessPoliciesOutput struct {
+	AccessPolicies []accessPolicySummary `json:"access_policies"`
+}
+
+func (h *handlers) listAccessPolicies(ctx context.Context, in listAccessPoliciesInput) (listAccessPoliciesOutput, error) {
+	organization := strings.TrimSpace(in.Organization)
+	if !strings.Contains(organization, "/") {
+		organization = "organizations/" + organization
+	}
+	policies, err := h.client.AccessPolicies(ctx, organization)
+	if err != nil {
+		return listAccessPoliciesOutput{}, err
+	}
+	output := listAccessPoliciesOutput{AccessPolicies: []accessPolicySummary{}}
+	for _, policy := range policies {
+		output.AccessPolicies = append(output.AccessPolicies, accessPolicySummary{
+			Name: policy.Name, Title: policy.Title, Parent: policy.Parent, Scopes: orEmpty(policy.Scopes),
+		})
+	}
+	return output, nil
+}
+
+type listServicePerimetersInput struct {
+	AccessPolicy string `json:"access_policy" jsonschema:"access policy ID, e.g. \"123456789\", or \"accessPolicies/<id>\" -- gcp_list_access_policies finds it."`
+	Project      string `json:"project,omitempty" jsonschema:"GCP project ID or number; when given, only the perimeters whose enforced or dry-run resources include the project are returned."`
+}
+
+type perimeterListing struct {
+	Name            string   `json:"name"`
+	Title           *string  `json:"title"`
+	PerimeterType   string   `json:"perimeter_type"`
+	Resources       []string `json:"resources"`
+	DryRunResources []string `json:"dry_run_resources"`
+}
+
+type listServicePerimetersOutput struct {
+	ServicePerimeters []perimeterListing `json:"service_perimeters"`
+}
+
+func (h *handlers) listServicePerimeters(ctx context.Context, in listServicePerimetersInput) (listServicePerimetersOutput, error) {
+	policy := strings.TrimSpace(in.AccessPolicy)
+	if !strings.Contains(policy, "/") {
+		policy = "accessPolicies/" + policy
+	}
+
+	// Perimeters name their projects by number, so a project ID is resolved to one first.
+	var member string
+	if project := strings.TrimPrefix(strings.TrimSpace(in.Project), "projects/"); project != "" {
+		if strings.Trim(project, "0123456789") != "" {
+			info, err := h.client.Project(ctx, project)
+			if err != nil {
+				return listServicePerimetersOutput{}, err
+			}
+			project = info.ProjectNumber()
+		}
+		member = "projects/" + project
+	}
+
+	perimeters, err := h.client.ServicePerimeters(ctx, policy)
+	if err != nil {
+		return listServicePerimetersOutput{}, err
+	}
+	output := listServicePerimetersOutput{ServicePerimeters: []perimeterListing{}}
+	for _, perimeter := range perimeters {
+		listing := perimeterListing{
+			Name: perimeter.Name, Title: perimeter.Title, PerimeterType: defaultPerimeterType,
+			Resources: []string{}, DryRunResources: []string{},
+		}
+		if perimeter.PerimeterType != nil {
+			listing.PerimeterType = *perimeter.PerimeterType
+		}
+		if perimeter.Status != nil {
+			listing.Resources = orEmpty(perimeter.Status.Resources)
+		}
+		if perimeter.Spec != nil {
+			listing.DryRunResources = orEmpty(perimeter.Spec.Resources)
+		}
+		if member != "" && !slices.Contains(listing.Resources, member) && !slices.Contains(listing.DryRunResources, member) {
+			continue
+		}
+		output.ServicePerimeters = append(output.ServicePerimeters, listing)
+	}
+	return output, nil
+}
+
+type getEffectiveOrgPolicyInput struct {
+	Resource   string `json:"resource" jsonschema:"GCP project ID, e.g. \"my-project\", or \"folders/<id>\" or \"organizations/<id>\"."`
+	Constraint string `json:"constraint" jsonschema:"the constraint name, e.g. \"iam.allowedPolicyMemberDomains\" or \"gcp.resourceLocations\"; a \"constraints/\" prefix, as error messages give it, is removed."`
+}
+
+type getEffectiveOrgPolicyOutput struct {
+	Name       string `json:"name"`
+	Spec       any    `json:"spec"`
+	DryRunSpec any    `json:"dry_run_spec"`
+}
+
+func (h *handlers) getEffectiveOrgPolicy(ctx context.Context, in getEffectiveOrgPolicyInput) (getEffectiveOrgPolicyOutput, error) {
+	constraint := strings.TrimPrefix(strings.TrimSpace(in.Constraint), "constraints/")
+	policy, err := h.client.EffectiveOrgPolicy(ctx, hierarchyName(in.Resource)+"/policies/"+constraint)
+	if err != nil {
+		return getEffectiveOrgPolicyOutput{}, err
+	}
+	return getEffectiveOrgPolicyOutput{Name: policy.Name, Spec: policy.Spec, DryRunSpec: policy.DryRunSpec}, nil
+}
+
+type searchIAMPoliciesInput struct {
+	Scope      string   `json:"scope" jsonschema:"where to search: \"organizations/<id>\", \"folders/<id>\", or a GCP project ID or number."`
+	Query      string   `json:"query" jsonschema:"Cloud Asset Inventory IAM policy query, e.g. \"policy:user@example.com\" for one member's bindings, \"policy:roles/storage.admin\" for one role's, or \"policy.role.permissions:storage.buckets.update\" for roles holding one permission."`
+	AssetTypes []string `json:"asset_types,omitempty" jsonschema:"asset types the policies are attached to, e.g. [\"cloudresourcemanager.googleapis.com/Project\"] or [\"storage.googleapis.com/Bucket\"]; regular expressions such as \"compute.googleapis.com.*\" are accepted. Omit it to search every type."`
+}
+
+type iamPolicySearchSummary struct {
+	Resource     *string       `json:"resource"`
+	AssetType    *string       `json:"asset_type"`
+	Project      *string       `json:"project"`
+	Folders      []string      `json:"folders"`
+	Organization *string       `json:"organization"`
+	Bindings     []gcp.Binding `json:"bindings"`
+}
+
+type searchIAMPoliciesOutput struct {
+	Results []iamPolicySearchSummary `json:"results"`
+}
+
+func (h *handlers) searchIAMPolicies(ctx context.Context, in searchIAMPoliciesInput) (searchIAMPoliciesOutput, error) {
+	if strings.TrimSpace(in.Query) == "" {
+		return searchIAMPoliciesOutput{}, errors.New(noQueryMessage)
+	}
+	results, err := h.client.SearchIAMPolicies(ctx, hierarchyName(in.Scope), in.Query, in.AssetTypes)
+	if err != nil {
+		return searchIAMPoliciesOutput{}, err
+	}
+	output := searchIAMPoliciesOutput{Results: []iamPolicySearchSummary{}}
+	for _, result := range results {
+		summary := iamPolicySearchSummary{
+			Resource: result.Resource, AssetType: result.AssetType, Project: result.Project,
+			Folders: orEmpty(result.Folders), Organization: result.Organization, Bindings: []gcp.Binding{},
+		}
+		for _, binding := range result.Policy.Bindings {
+			binding.Members = orEmpty(binding.Members)
+			summary.Bindings = append(summary.Bindings, binding)
+		}
+		output.Results = append(output.Results, summary)
+	}
+	return output, nil
+}
+
+type listOrganizationsInput struct {
+	Query string `json:"query,omitempty" jsonschema:"filter, e.g. \"domain:example.com\" or \"directorycustomerid:123456789\"; omit it to list every organization the identity can see."`
+}
+
+type organizationSummary struct {
+	Name                string  `json:"name"`
+	DisplayName         *string `json:"display_name"`
+	DirectoryCustomerID *string `json:"directory_customer_id"`
+	State               *string `json:"state"`
+}
+
+type listOrganizationsOutput struct {
+	Organizations []organizationSummary `json:"organizations"`
+}
+
+func (h *handlers) listOrganizations(ctx context.Context, in listOrganizationsInput) (listOrganizationsOutput, error) {
+	organizations, err := h.client.Organizations(ctx, strings.TrimSpace(in.Query))
+	if err != nil {
+		return listOrganizationsOutput{}, err
+	}
+	output := listOrganizationsOutput{Organizations: []organizationSummary{}}
+	for _, organization := range organizations {
+		output.Organizations = append(output.Organizations, organizationSummary{
+			Name: organization.Name, DisplayName: organization.DisplayName,
+			DirectoryCustomerID: organization.DirectoryCustomerID, State: organization.State,
+		})
+	}
+	return output, nil
+}
+
+type listFoldersInput struct {
+	Parent string `json:"parent,omitempty" jsonschema:"\"organizations/<id>\" or \"folders/<id>\" to list that resource's direct child folders; excludes query."`
+	Query  string `json:"query,omitempty" jsonschema:"search across every folder the identity can see, e.g. \"displayName=Prod*\" or \"parent=folders/123 AND state=ACTIVE\"; excludes parent. Omit both to list every visible folder."`
+}
+
+type folderSummary struct {
+	Name        string  `json:"name"`
+	DisplayName *string `json:"display_name"`
+	Parent      *string `json:"parent"`
+	State       *string `json:"state"`
+}
+
+type listFoldersOutput struct {
+	Folders []folderSummary `json:"folders"`
+}
+
+func (h *handlers) listFolders(ctx context.Context, in listFoldersInput) (listFoldersOutput, error) {
+	parent, query := strings.TrimSpace(in.Parent), strings.TrimSpace(in.Query)
+	if parent != "" && query != "" {
+		return listFoldersOutput{}, errors.New(parentAndQueryMessage)
+	}
+	folders, err := h.client.Folders(ctx, parent, query)
+	if err != nil {
+		return listFoldersOutput{}, err
+	}
+	output := listFoldersOutput{Folders: []folderSummary{}}
+	for _, folder := range folders {
+		output.Folders = append(output.Folders, folderSummary{
+			Name: folder.Name, DisplayName: folder.DisplayName, Parent: folder.Parent, State: folder.State,
+		})
+	}
+	return output, nil
+}
+
+type listProjectsInput struct {
+	Parent string `json:"parent,omitempty" jsonschema:"\"organizations/<id>\" or \"folders/<id>\" to list that resource's direct child projects; excludes query."`
+	Query  string `json:"query,omitempty" jsonschema:"search across every project the identity can see, e.g. \"name:prod*\" or \"labels.env:prod\"; excludes parent. Omit both to list every visible project."`
+}
+
+type projectListing struct {
+	ProjectID     *string           `json:"project_id"`
+	ProjectNumber string            `json:"project_number"`
+	DisplayName   *string           `json:"display_name"`
+	Parent        *string           `json:"parent"`
+	State         *string           `json:"state"`
+	Labels        map[string]string `json:"labels"`
+}
+
+type listProjectsOutput struct {
+	Projects []projectListing `json:"projects"`
+}
+
+func (h *handlers) listProjects(ctx context.Context, in listProjectsInput) (listProjectsOutput, error) {
+	parent, query := strings.TrimSpace(in.Parent), strings.TrimSpace(in.Query)
+	if parent != "" && query != "" {
+		return listProjectsOutput{}, errors.New(parentAndQueryMessage)
+	}
+	projects, err := h.client.Projects(ctx, parent, query)
+	if err != nil {
+		return listProjectsOutput{}, err
+	}
+	output := listProjectsOutput{Projects: []projectListing{}}
+	for _, project := range projects {
+		labels := project.Labels
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		output.Projects = append(output.Projects, projectListing{
+			ProjectID: project.ProjectID, ProjectNumber: project.ProjectNumber(), DisplayName: project.DisplayName,
+			Parent: project.Parent, State: project.State, Labels: labels,
 		})
 	}
 	return output, nil

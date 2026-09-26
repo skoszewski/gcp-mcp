@@ -227,15 +227,15 @@ func TestNameValidation(t *testing.T) {
 	}
 }
 
-func TestProjectIAMBindingsCache(t *testing.T) {
+func TestIAMBindingsCache(t *testing.T) {
 	client, requests := fakeAPI(t, func(w http.ResponseWriter, _ *http.Request, _ string) {
 		io.WriteString(w, `{"bindings":[{"role":"roles/viewer","members":["user:a@example.com"]}]}`)
 	})
 	ctx := context.Background()
 	for range 2 {
-		bindings, err := client.ProjectIAMBindings(ctx, "p")
+		bindings, err := client.IAMBindings(ctx, "projects/p")
 		if err != nil || len(bindings) != 1 || *bindings[0].Role != "roles/viewer" {
-			t.Fatalf("ProjectIAMBindings() = %+v, %v", bindings, err)
+			t.Fatalf("IAMBindings() = %+v, %v", bindings, err)
 		}
 	}
 	if len(*requests) != 1 {
@@ -247,11 +247,70 @@ func TestProjectIAMBindingsCache(t *testing.T) {
 		t.Errorf("request = %s %s", first.url, first.body)
 	}
 
-	if _, err := client.ProjectIAMBindings(WithAuthorization(ctx, "Bearer other"), "p"); err != nil {
+	if _, err := client.IAMBindings(WithAuthorization(ctx, "Bearer other"), "projects/p"); err != nil {
 		t.Fatal(err)
 	}
 	if len(*requests) != 2 {
 		t.Errorf("bindings reused across credentials: %d requests", len(*requests))
+	}
+
+	for resource, want := range map[string]string{
+		"folders/1":       "https://cloudresourcemanager.googleapis.com/v3/folders/1:getIamPolicy",
+		"organizations/2": "https://cloudresourcemanager.googleapis.com/v3/organizations/2:getIamPolicy",
+	} {
+		if _, err := client.IAMBindings(ctx, resource); err != nil {
+			t.Fatal(err)
+		}
+		if got := (*requests)[len(*requests)-1].url; got != want {
+			t.Errorf("%s: url = %s", resource, got)
+		}
+	}
+	if _, err := client.IAMBindings(ctx, "billingAccounts/1"); err == nil {
+		t.Error("IAMBindings of a billing account: expected an error")
+	}
+}
+
+func TestListAllPaging(t *testing.T) {
+	client, requests := fakeAPI(t, func(w http.ResponseWriter, r *http.Request, _ string) {
+		if r.URL.Query().Get("pageToken") == "next" {
+			io.WriteString(w, `{"projects":[{"name":"projects/2"}]}`)
+			return
+		}
+		io.WriteString(w, `{"projects":[{"name":"projects/1","projectId":"a"}],"nextPageToken":"next"}`)
+	})
+	projects, err := client.Projects(context.Background(), "", "name:a*")
+	if err != nil || len(projects) != 2 || projects[1].ProjectNumber() != "2" {
+		t.Fatalf("Projects() = %+v, %v", projects, err)
+	}
+	if got := (*requests)[0].url; got != "https://cloudresourcemanager.googleapis.com/v3/projects:search?query=name%3Aa%2A" {
+		t.Errorf("first url = %s", got)
+	}
+	if got := (*requests)[1].url; got != "https://cloudresourcemanager.googleapis.com/v3/projects:search?pageToken=next&query=name%3Aa%2A" {
+		t.Errorf("second url = %s", got)
+	}
+
+	if _, err := client.Folders(context.Background(), "organizations/1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := (*requests)[2].url; got != "https://cloudresourcemanager.googleapis.com/v3/folders?parent=organizations%2F1" {
+		t.Errorf("folders url = %s", got)
+	}
+	if _, err := client.Folders(context.Background(), "projects/1", ""); err == nil {
+		t.Error("Folders under a project: expected an error")
+	}
+}
+
+func TestSearchIAMPolicies(t *testing.T) {
+	client, requests := fakeAPI(t, func(w http.ResponseWriter, _ *http.Request, _ string) {
+		io.WriteString(w, `{"results":[{"resource":"//r","policy":{"bindings":[{"role":"roles/viewer"}]}}]}`)
+	})
+	results, err := client.SearchIAMPolicies(context.Background(), "organizations/1", "policy:a", []string{"x", "y"})
+	if err != nil || len(results) != 1 || *results[0].Policy.Bindings[0].Role != "roles/viewer" {
+		t.Fatalf("SearchIAMPolicies() = %+v, %v", results, err)
+	}
+	want := "https://cloudasset.googleapis.com/v1/organizations/1:searchAllIamPolicies?assetTypes=x&assetTypes=y&pageSize=500&query=policy%3Aa"
+	if got := (*requests)[0].url; got != want {
+		t.Errorf("url = %s", got)
 	}
 }
 

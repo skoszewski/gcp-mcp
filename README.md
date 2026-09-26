@@ -1,9 +1,10 @@
 # gcp-mcp
 
 An MCP server that gives an AI client read-only access to the Google Cloud side of an
-investigation: Cloud Audit Logs, VPC Service Controls perimeters and access levels, project IAM
-policies and project identifiers. It runs as a binary or as a container, over Streamable HTTP or
-stdio.
+investigation: Cloud Audit Logs, VPC Service Controls access policies, perimeters and access
+levels, the organization, folder and project hierarchy, IAM policies, roles and service
+accounts, and organization policies. It runs as a binary or as a container, over Streamable HTTP
+or stdio.
 
 ## Tools
 
@@ -12,20 +13,47 @@ stdio.
 | `gcp_query_cloud_logging` | Cloud Logging entries matching a filter expression, newest first, in a time window |
 | `gcp_get_service_perimeter_policy` | A VPC Service Controls perimeter's enforced and dry-run configuration |
 | `gcp_get_access_level` | A VPC Service Controls access level's conditions: IP ranges, members, regions, device policy |
-| `gcp_get_iam_policy` | A project's IAM policy bindings |
-| `gcp_get_iam_roles_for_member` | The roles one member holds on a project |
+| `gcp_list_access_policies` | An organization's VPC Service Controls access policies |
+| `gcp_list_service_perimeters` | An access policy's perimeters and the resources they protect, optionally only those around one project |
+| `gcp_get_iam_policy` | A project's, folder's or organization's IAM policy bindings |
+| `gcp_get_iam_roles_for_member` | The roles one member holds on a project, folder or organization |
+| `gcp_get_role` | A predefined or custom role's title, stage and included permissions |
+| `gcp_troubleshoot_iam_permission` | Policy Troubleshooter's verdict on whether a principal has a permission on a resource |
+| `gcp_get_service_account` | A service account's details, by email or unique ID, and the IAM policy attached to it |
+| `gcp_search_iam_policies` | Cloud Asset Inventory search of the IAM policies in an organization, folder or project |
+| `gcp_get_effective_org_policy` | The organization policy in effect for one constraint on a project, folder or organization |
 | `gcp_resolve_project_identifiers` | Project IDs, numbers and display names from any of them, several per call |
+| `gcp_get_project_ancestry` | The folders and organization above a project, nearest first |
+| `gcp_list_organizations` | The organizations the identity can see |
+| `gcp_list_folders` | The folders directly under an organization or folder, or a search across all visible folders |
+| `gcp_list_projects` | The projects directly under an organization or folder, or a search across all visible projects |
 
 `gcp_query_cloud_logging` searches the project given as `scope`, or the default project described
 below when a call names none. A bare project ID is prefixed with `projects/`. A filter that
 restricts no `timestamp`, after `start`, `end` or `freshness` are applied, is limited to the last
 24 hours. The tool reads every page of matching entries, 50 per request.
 
-`gcp_get_iam_policy` and `gcp_get_iam_roles_for_member` reuse a project's bindings for five
-minutes for the same credential.
+`gcp_get_iam_policy` and `gcp_get_iam_roles_for_member` take a project ID, `folders/<id>` or
+`organizations/<id>`, and reuse a resource's bindings for five minutes for the same credential.
 
 `gcp_resolve_project_identifiers` reports a project it cannot resolve with an `error` field
 instead of failing the call.
+
+`gcp_troubleshoot_iam_permission` returns, for each allow policy it evaluated, only the bindings
+whose role includes the permission. Policy Troubleshooter checks users and service accounts
+only, not groups, domains or workforce and workload identities.
+
+`gcp_get_service_account` looks the account up across all projects. When the account's own IAM
+policy cannot be read, it returns the account with the reason in `iam_policy_error`.
+
+`gcp_list_service_perimeters` given a project ID resolves it to the project number perimeters
+list their resources by, and returns the perimeters whose enforced or dry-run resources include
+it.
+
+`gcp_search_iam_policies` requires a query. It and the list tools read every page of results;
+`gcp_search_iam_policies` asks for 500 per request. `gcp_list_folders` and
+`gcp_list_projects` take either `parent`, listing its direct children, or `query`, searching
+every visible resource, and list every visible resource when given neither.
 
 ## Authentication
 
@@ -61,13 +89,26 @@ The identity needs these permissions on the resources it reads:
 
 - `logging.logEntries.list`, e.g. the Logs Viewer role, and `logging.privateLogEntries.list`,
   e.g. the Private Logs Viewer role, for Data Access audit logs
-- `accesscontextmanager.servicePerimeters.get` and `accesscontextmanager.accessLevels.get`,
-  e.g. the Access Context Manager Reader role on the organization
-- `resourcemanager.projects.getIamPolicy` and `resourcemanager.projects.get`, e.g. the Security
-  Reviewer and Browser roles
+- `accesscontextmanager.servicePerimeters.get`, `accesscontextmanager.servicePerimeters.list`,
+  `accesscontextmanager.accessLevels.get` and `accesscontextmanager.policies.list`, e.g. the
+  Access Context Manager Reader role on the organization
+- `resourcemanager.projects.getIamPolicy`, `resourcemanager.folders.getIamPolicy`,
+  `resourcemanager.organizations.getIamPolicy` and `iam.serviceAccounts.getIamPolicy`, e.g. the
+  Security Reviewer role
+- `resourcemanager.projects.get`, `resourcemanager.projects.list`,
+  `resourcemanager.folders.get`, `resourcemanager.folders.list` and
+  `resourcemanager.organizations.get`, e.g. the Browser role
+- `iam.serviceAccounts.get` for `gcp_get_service_account`
+- `iam.roles.get` for custom roles in `gcp_get_role`, e.g. the Role Viewer role
+- for `gcp_troubleshoot_iam_permission`, the Security Reviewer and Deny Reviewer roles on the
+  organization holding the resource, and the Browser role for bindings with service account
+  principal sets
+- `orgpolicy.policies.get` for `gcp_get_effective_org_policy`
+- `cloudasset.assets.searchAllIamPolicies` on the scope `gcp_search_iam_policies` searches
 
-With user credentials, Google Cloud charges the Resource Manager and Access Context Manager
-calls to a quota project. The server sends the credentials file's `quota_project_id`, which
+With user credentials, Google Cloud charges the Resource Manager, Access Context Manager, IAM,
+Policy Troubleshooter, Organization Policy and Cloud Asset calls to a quota project, which must
+have those APIs enabled. The server sends the credentials file's `quota_project_id`, which
 `gcloud auth application-default set-quota-project` sets, or `GOOGLE_CLOUD_QUOTA_PROJECT`
 when it is set. With an access token, only `GOOGLE_CLOUD_QUOTA_PROJECT` sets it.
 
