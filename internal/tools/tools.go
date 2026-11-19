@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -21,33 +22,74 @@ const (
 	defaultCombiningFunction = "AND"
 )
 
+// projectSettings are the default project and quota project one MCP session switched to; an
+// empty value keeps the server's own.
+type projectSettings struct {
+	project      string
+	quotaProject string
+}
+
 // handlers implements the tools on top of a Google Cloud client.
 type handlers struct {
 	client *gcp.Client
+
+	sessionsMu sync.Mutex
+	sessions   map[*mcp.ServerSession]projectSettings
 }
 
+type sessionKey struct{}
+
 // Register adds every Google Cloud tool to server and returns their names in registration
-// order.
-func Register(server *mcp.Server, client *gcp.Client) []string {
-	h := &handlers{client: client}
-	return []string{
-		addTool(server, "gcp_query_cloud_logging", queryCloudLoggingDescription, h.queryCloudLogging),
-		addTool(server, "gcp_get_service_perimeter_policy", getServicePerimeterPolicyDescription, h.getServicePerimeterPolicy),
-		addTool(server, "gcp_get_access_level", getAccessLevelDescription, h.getAccessLevel),
-		addTool(server, "gcp_get_iam_policy", getIAMPolicyDescription, h.getIAMPolicy),
-		addTool(server, "gcp_get_iam_roles_for_member", getIAMRolesForMemberDescription, h.getIAMRolesForMember),
-		addTool(server, "gcp_resolve_project_identifiers", resolveProjectIdentifiersDescription, h.resolveProjectIdentifiers),
-		addTool(server, "gcp_get_role", getRoleDescription, h.getRole),
-		addTool(server, "gcp_get_project_ancestry", getProjectAncestryDescription, h.getProjectAncestry),
-		addTool(server, "gcp_troubleshoot_iam_permission", troubleshootIAMPermissionDescription, h.troubleshootIAMPermission),
-		addTool(server, "gcp_get_service_account", getServiceAccountDescription, h.getServiceAccount),
-		addTool(server, "gcp_list_access_policies", listAccessPoliciesDescription, h.listAccessPolicies),
-		addTool(server, "gcp_list_service_perimeters", listServicePerimetersDescription, h.listServicePerimeters),
-		addTool(server, "gcp_get_effective_org_policy", getEffectiveOrgPolicyDescription, h.getEffectiveOrgPolicy),
-		addTool(server, "gcp_search_iam_policies", searchIAMPoliciesDescription, h.searchIAMPolicies),
-		addTool(server, "gcp_list_organizations", listOrganizationsDescription, h.listOrganizations),
-		addTool(server, "gcp_list_folders", listFoldersDescription, h.listFolders),
-		addTool(server, "gcp_list_projects", listProjectsDescription, h.listProjects),
+// order. allowProjectChange adds gcp_set_project, which switches the default project and the
+// quota project of the calling MCP session.
+func Register(server *mcp.Server, client *gcp.Client, allowProjectChange bool) []string {
+	h := &handlers{client: client, sessions: map[*mcp.ServerSession]projectSettings{}}
+	names := []string{
+		addTool(server, h, "gcp_query_cloud_logging", queryCloudLoggingDescription, h.queryCloudLogging),
+		addTool(server, h, "gcp_get_service_perimeter_policy", getServicePerimeterPolicyDescription, h.getServicePerimeterPolicy),
+		addTool(server, h, "gcp_get_access_level", getAccessLevelDescription, h.getAccessLevel),
+		addTool(server, h, "gcp_get_iam_policy", getIAMPolicyDescription, h.getIAMPolicy),
+		addTool(server, h, "gcp_get_iam_roles_for_member", getIAMRolesForMemberDescription, h.getIAMRolesForMember),
+		addTool(server, h, "gcp_resolve_project_identifiers", resolveProjectIdentifiersDescription, h.resolveProjectIdentifiers),
+		addTool(server, h, "gcp_get_role", getRoleDescription, h.getRole),
+		addTool(server, h, "gcp_get_project_ancestry", getProjectAncestryDescription, h.getProjectAncestry),
+		addTool(server, h, "gcp_troubleshoot_iam_permission", troubleshootIAMPermissionDescription, h.troubleshootIAMPermission),
+		addTool(server, h, "gcp_get_service_account", getServiceAccountDescription, h.getServiceAccount),
+		addTool(server, h, "gcp_list_access_policies", listAccessPoliciesDescription, h.listAccessPolicies),
+		addTool(server, h, "gcp_list_service_perimeters", listServicePerimetersDescription, h.listServicePerimeters),
+		addTool(server, h, "gcp_get_effective_org_policy", getEffectiveOrgPolicyDescription, h.getEffectiveOrgPolicy),
+		addTool(server, h, "gcp_search_iam_policies", searchIAMPoliciesDescription, h.searchIAMPolicies),
+		addTool(server, h, "gcp_list_organizations", listOrganizationsDescription, h.listOrganizations),
+		addTool(server, h, "gcp_list_folders", listFoldersDescription, h.listFolders),
+		addTool(server, h, "gcp_list_projects", listProjectsDescription, h.listProjects),
+	}
+	if allowProjectChange {
+		names = append(names, addTool(server, h, "gcp_set_project", setProjectDescription, h.setProject))
+	}
+	return names
+}
+
+// sessionSettings returns the project settings session switched to.
+func (h *handlers) sessionSettings(session *mcp.ServerSession) projectSettings {
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+	return h.sessions[session]
+}
+
+// setSessionSettings stores the project settings of session and forgets them once the session
+// closes.
+func (h *handlers) setSessionSettings(session *mcp.ServerSession, settings projectSettings) {
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+	_, known := h.sessions[session]
+	h.sessions[session] = settings
+	if !known {
+		go func() {
+			session.Wait()
+			h.sessionsMu.Lock()
+			defer h.sessionsMu.Unlock()
+			delete(h.sessions, session)
+		}()
 	}
 }
 
@@ -72,9 +114,10 @@ func principalEmail(member string) string {
 
 // addTool registers handler as the tool name, with the input schema inferred from In. An
 // Authorization header on the HTTP request carrying the call replaces the configured credential
-// for that call. Every call is logged at debug level, and a handler error reaches the caller as
-// a tool error result.
-func addTool[In, Out any](server *mcp.Server, name, description string, handler func(context.Context, In) (Out, error)) string {
+// for that call, and the projects the calling session switched to replace the configured ones.
+// Every call is logged at debug level, and a handler error reaches the caller as a tool error
+// result.
+func addTool[In, Out any](server *mcp.Server, h *handlers, name, description string, handler func(context.Context, In) (Out, error)) string {
 	schema, err := jsonschema.For[In](nil)
 	if err != nil {
 		panic(fmt.Sprintf("tool %s: %v", name, err))
@@ -86,6 +129,16 @@ func addTool[In, Out any](server *mcp.Server, name, description string, handler 
 			if request.Extra != nil {
 				if authorization := request.Extra.Header.Get("Authorization"); authorization != "" {
 					ctx = gcp.WithAuthorization(ctx, authorization)
+				}
+			}
+			if request.Session != nil {
+				ctx = context.WithValue(ctx, sessionKey{}, request.Session)
+				settings := h.sessionSettings(request.Session)
+				if settings.project != "" {
+					ctx = gcp.WithProject(ctx, settings.project)
+				}
+				if settings.quotaProject != "" {
+					ctx = gcp.WithQuotaProject(ctx, settings.quotaProject)
 				}
 			}
 			output, err := handler(ctx, input)
@@ -127,6 +180,9 @@ type queryCloudLoggingOutput struct {
 
 func (h *handlers) queryCloudLogging(ctx context.Context, in queryCloudLoggingInput) (queryCloudLoggingOutput, error) {
 	scope := in.Scope
+	if scope == "" {
+		scope = gcp.RequestProject(ctx)
+	}
 	if scope == "" {
 		scope = h.client.Auth.Project()
 	}
@@ -753,4 +809,66 @@ func (h *handlers) listProjects(ctx context.Context, in listProjectsInput) (list
 		})
 	}
 	return output, nil
+}
+
+type setProjectInput struct {
+	Project      string `json:"project,omitempty" jsonschema:"GCP project ID or number to make this session's default project, the one gcp_query_cloud_logging searches when a call names no scope; it must exist and be visible to the server's identity. Omit it to keep the current default project."`
+	QuotaProject string `json:"quota_project,omitempty" jsonschema:"GCP project ID or number this session's requests are billed and rate-limited against (the X-Goog-User-Project header); the identity needs serviceusage.services.use on it and the called APIs must be enabled there. Omit it to keep the current quota project."`
+	Reset        bool   `json:"reset,omitempty" jsonschema:"drop both of this session's switched projects first, returning to the server's own; project and quota_project given in the same call are applied after the reset."`
+}
+
+type projectSetting struct {
+	Value  *string `json:"value"`
+	Source string  `json:"source"`
+}
+
+type setProjectOutput struct {
+	DefaultProject projectSetting `json:"default_project"`
+	QuotaProject   projectSetting `json:"quota_project"`
+}
+
+func (h *handlers) setProject(ctx context.Context, in setProjectInput) (setProjectOutput, error) {
+	session, _ := ctx.Value(sessionKey{}).(*mcp.ServerSession)
+	if session == nil {
+		return setProjectOutput{}, errors.New(noSessionMessage)
+	}
+	settings := h.sessionSettings(session)
+	if in.Reset {
+		settings = projectSettings{}
+	}
+	if project := strings.TrimPrefix(strings.TrimSpace(in.Project), "projects/"); project != "" {
+		info, err := h.client.Project(ctx, project)
+		if err != nil {
+			return setProjectOutput{}, err
+		}
+		settings.project = project
+		if info.ProjectID != nil {
+			settings.project = *info.ProjectID
+		}
+	}
+	if quotaProject := strings.TrimPrefix(strings.TrimSpace(in.QuotaProject), "projects/"); quotaProject != "" {
+		settings.quotaProject = quotaProject
+	}
+	h.setSessionSettings(session, settings)
+
+	// A call carrying the client's own Authorization header sends no configured quota project.
+	serverQuotaProject := h.client.Auth.QuotaProject()
+	if gcp.RequestAuthorization(ctx) != "" {
+		serverQuotaProject = ""
+	}
+	return setProjectOutput{
+		DefaultProject: effectiveSetting(settings.project, h.client.Auth.Project()),
+		QuotaProject:   effectiveSetting(settings.quotaProject, serverQuotaProject),
+	}, nil
+}
+
+// effectiveSetting reports the session's value when it has one, otherwise the server's.
+func effectiveSetting(sessionValue, serverValue string) projectSetting {
+	switch {
+	case sessionValue != "":
+		return projectSetting{Value: &sessionValue, Source: "session"}
+	case serverValue != "":
+		return projectSetting{Value: &serverValue, Source: "server"}
+	}
+	return projectSetting{Source: "none"}
 }

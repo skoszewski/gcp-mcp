@@ -27,6 +27,7 @@ or stdio.
 | `gcp_list_organizations` | The organizations the identity can see |
 | `gcp_list_folders` | The folders directly under an organization or folder, or a search across all visible folders |
 | `gcp_list_projects` | The projects directly under an organization or folder, or a search across all visible projects |
+| `gcp_set_project` | Switches the calling session's default project and quota project, or reports them; only with `--allow-project-change` |
 
 `gcp_query_cloud_logging` searches the project given as `scope`, or the default project described
 below when a call names none. A bare project ID is prefixed with `projects/`. A filter that
@@ -126,13 +127,34 @@ when it is set. With an access token, only `GOOGLE_CLOUD_QUOTA_PROJECT` sets it.
 The project in use is logged at startup. Without one, every `gcp_query_cloud_logging` call has to
 name its `scope`.
 
+### Switching projects per session
+
+`--allow-project-change` registers `gcp_set_project`. It sets the default project and the quota
+project for the MCP session that calls it, until that session ends; other sessions keep the
+server's own. Its arguments are:
+
+- `project`: a project ID or number. The server looks it up with Resource Manager, stores its
+  project ID, and fails without changing anything when the lookup fails.
+- `quota_project`: a project ID or number, used as given. The identity needs
+  `serviceusage.services.use` on it, and the called APIs must be enabled there.
+- `reset`: drops both switched values before the other arguments are applied.
+
+Every call returns the values in effect, each with its `source`: `session`, `server` or `none`.
+A switched quota project is also sent with requests that carry the MCP client's own
+`Authorization` header.
+
+Over HTTP the flag makes the endpoint stateful: `initialize` returns an `Mcp-Session-Id`, the
+client sends it with every later request, and a session closes after 30 minutes without a
+request. Without the flag the endpoint is stateless. Over stdio the whole connection is one
+session.
+
 ### Credentials sent by the MCP client
 
 Over the HTTP transport, an `Authorization` header on the MCP request replaces the configured
 credential for that request. The server forwards the value unchanged to Google Cloud, so it takes
 the form `Bearer <token>`, where `<token>` is an OAuth access token with the `cloud-platform`
 scope, e.g. from `gcloud auth print-access-token`. A request with its own header sends no quota
-project.
+project, unless the session switched to one with `gcp_set_project`.
 
 A client without the header, and every client on stdio, uses the configured credential; with
 `--auth none` such a call fails. For example, in a Claude Code configuration:
@@ -183,6 +205,7 @@ authentication of its own, so anyone who can reach the Service uses the server's
 | `serviceAccountName` | | Kubernetes service account the pod runs as, e.g. one bound to a Google service account through Workload Identity Federation for GKE |
 | `credentialsSecret` | | Secret holding a credentials file under the key `credentials.json`, mounted as `GOOGLE_APPLICATION_CREDENTIALS`; empty to use the metadata server |
 | `project` | | Default project, set as `GOOGLE_CLOUD_PROJECT` |
+| `allowProjectChange` | `false` | Passes `--allow-project-change`, registering `gcp_set_project` |
 | `port` | `8889` | Port the server listens on and the Service exposes |
 | `serviceType` | `LoadBalancer` | Service type, e.g. `ClusterIP` for access from inside the cluster only |
 
@@ -256,13 +279,14 @@ scripts/run_container.ps1
 | `--host` | `127.0.0.1` | Address the HTTP server binds to; the container image sets `0.0.0.0` |
 | `--port` | `8889` | HTTP port |
 | `--path` | `/mcp` | HTTP path of the MCP endpoint |
+| `--allow-project-change` | off | Registers `gcp_set_project` and makes the HTTP endpoint stateful; see Switching projects per session |
 | `--debug[=N]` | `0` | `1` logs tool calls, `2` adds incoming HTTP requests, `3` adds the MCP library's own logging |
 | `--log-style` | `auto` | `human`, `daemon`, or `auto` for `human` when stdout is a terminal; see Logging |
 
 ## Logging
 
 `gcp-mcp` logs to stderr in one of two styles. `human` starts with a banner listing the version,
-authentication method, default project, tools and endpoint, and writes one readable line per
+authentication method, default and quota projects, tools and endpoint, and writes one readable line per
 event, colored when stderr is a terminal. `daemon` writes timestamped `key=value` records for a
 container runtime, service manager or MCP client to collect. `--log-style auto`, the default,
 uses `human` when stdout is a terminal and `daemon` otherwise.

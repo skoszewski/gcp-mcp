@@ -67,12 +67,14 @@ header keeps one client's credential from reading bindings fetched with another'
 
 **Decision:** When the HTTP request carrying a tool call has an `Authorization` header, the
 server sends its value unchanged as the `Authorization` header of that call's Google Cloud
-requests, without a quota project header, in place of the Application Default Credentials.
-`--auth none` holds no credential and relies on the header. The header is not logged.
+requests, without the configured quota project, in place of the Application Default
+Credentials. A quota project the session switched to with `gcp_set_project` (ADR-012) is still
+sent. `--auth none` holds no credential and relies on the header. The header is not logged.
 
 **Reason:** Different users need different identities, while the configured credential gives
-every client the server's single identity. The quota project belongs to the server's
-credentials, and the client's identity may not be allowed to use it.
+every client the server's single identity. The configured quota project belongs to the server's
+credentials, and the client's identity may not be allowed to use it; a quota project the session
+chose itself carries no such assumption.
 
 ## ADR-007: No Google Cloud CLI in the container image
 
@@ -85,7 +87,8 @@ replaces that.
 
 ## ADR-008: Stateless Streamable HTTP and stdio transports, human and daemon log styles
 
-**Decision:** The server follows `ado-mcp`: stateless Streamable HTTP by default and stdio for
+**Decision:** The server follows `ado-mcp`: stateless Streamable HTTP by default (stateful only
+under `--allow-project-change`, ADR-012) and stdio for
 clients that start the server themselves, human or daemon log style chosen by `--log-style`,
 container scripts that prefer Docker and fall back to Apple `container`, and a Helm chart. Its
 default port is 8889.
@@ -147,3 +150,22 @@ permission, because those cannot grant it and account for most of the response.
 API documents that a missing account can answer 403 instead of 404. It then reads the account's
 own policy under the name returned. The list and search tools read every page, as
 `gcp_query_cloud_logging` does.
+
+## ADR-012: Default and quota project switched per MCP session
+
+**Decision:** `--allow-project-change` registers `gcp_set_project`, which stores a default
+project and a quota project for the calling MCP session. Every tool call of that session carries
+them in its context; `gcp_query_cloud_logging` takes the default project from it before the
+server's, and every Google Cloud request sends the quota project in place of the configured one.
+A switched project is looked up with Resource Manager and stored as its project ID; a quota
+project is not looked up. The values are dropped when the session closes. With the flag, the
+Streamable HTTP endpoint keeps sessions, closing one after 30 minutes without a request; without
+it, the endpoint stays stateless and the tool is not registered.
+
+**Reason:** An investigation that crosses projects needs another project's logs as its default
+and another project to bill, while one server serves several clients at once, so a
+process-wide switch would change them for every client. Sessions are the unit the MCP protocol
+gives a server to tell clients apart, and a stateless endpoint has none. Using a project for
+quota is a different permission from reading it, so a lookup would reject quota projects the
+identity can use. The tool is opt-in because it lets the agent choose what the server's identity
+is billed against.

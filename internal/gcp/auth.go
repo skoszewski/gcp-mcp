@@ -49,6 +49,8 @@ type Authorizer interface {
 	Method() string
 	// Project returns the project a tool call applies to when it names none, or "".
 	Project() string
+	// QuotaProject returns the quota project Authorize sends, or "".
+	QuotaProject() string
 }
 
 // NewAuthorizer returns the Authorizer for method, reading its settings through getenv.
@@ -211,6 +213,10 @@ func (a *adcAuthorizer) Project() string {
 	return a.project
 }
 
+func (a *adcAuthorizer) QuotaProject() string {
+	return a.quotaProject
+}
+
 // accessTokenAuthorizer authenticates with an access token given by value or in a file. The
 // token is not refreshed; a file is read again for every request, so replacing its content
 // replaces the token.
@@ -246,6 +252,10 @@ func (a *accessTokenAuthorizer) Project() string {
 	return a.project
 }
 
+func (a *accessTokenAuthorizer) QuotaProject() string {
+	return a.quotaProject
+}
+
 // noneAuthorizer holds no credential; a request succeeds only with one from WithAuthorization.
 type noneAuthorizer struct {
 	project string
@@ -263,7 +273,38 @@ func (a noneAuthorizer) Project() string {
 	return a.project
 }
 
-type authorizationKey struct{}
+func (noneAuthorizer) QuotaProject() string {
+	return ""
+}
+
+type (
+	authorizationKey struct{}
+	projectKey       struct{}
+	quotaProjectKey  struct{}
+)
+
+// WithProject returns a context in which project replaces the Authorizer's default project.
+func WithProject(ctx context.Context, project string) context.Context {
+	return context.WithValue(ctx, projectKey{}, project)
+}
+
+// RequestProject returns the default project WithProject stored in ctx, or "".
+func RequestProject(ctx context.Context) string {
+	value, _ := ctx.Value(projectKey{}).(string)
+	return value
+}
+
+// WithQuotaProject returns a context whose requests send quotaProject as their quota project,
+// also when they carry an Authorization header from WithAuthorization.
+func WithQuotaProject(ctx context.Context, quotaProject string) context.Context {
+	return context.WithValue(ctx, quotaProjectKey{}, quotaProject)
+}
+
+// RequestQuotaProject returns the quota project WithQuotaProject stored in ctx, or "".
+func RequestQuotaProject(ctx context.Context) string {
+	value, _ := ctx.Value(quotaProjectKey{}).(string)
+	return value
+}
 
 // WithAuthorization returns a context whose requests send value as their Authorization header
 // instead of authenticating with the client's Authorizer.

@@ -32,6 +32,7 @@ const (
 	serverName      = "gcp-mcp"
 	shutdownTimeout = 15 * time.Second
 	httpTimeout     = 2 * time.Minute
+	sessionTimeout  = 30 * time.Minute
 	debugToolCalls  = 1
 	debugRequests   = 2
 	debugSDK        = 3
@@ -70,6 +71,9 @@ Flags:
       --host <address>       address the HTTP server binds to (default: 127.0.0.1)
       --port <port>          port the HTTP server listens on (default: 8889)
       --path <path>          URL path of the MCP endpoint (default: /mcp)
+      --allow-project-change add gcp_set_project, which switches the default project and the
+                             quota project of the calling MCP session; HTTP sessions then keep
+                             state and close after 30 minutes without a request
       --debug[=<level>]      debug output: 1 (a bare --debug) logs tool calls, 2 adds HTTP
                              requests, 3 adds the MCP library's own logging
       --log-style <style>    human (colored, readable lines), daemon (timestamped key=value
@@ -113,14 +117,15 @@ func (d *debugLevel) IsBoolFlag() bool {
 }
 
 type options struct {
-	transport   string
-	auth        string
-	host        string
-	port        int
-	path        string
-	debug       debugLevel
-	logStyle    string
-	interactive bool
+	transport          string
+	auth               string
+	host               string
+	port               int
+	path               string
+	allowProjectChange bool
+	debug              debugLevel
+	logStyle           string
+	interactive        bool
 }
 
 func parseFlags() options {
@@ -135,6 +140,7 @@ func parseFlags() options {
 	flags.StringVar(&opts.host, "host", "127.0.0.1", "")
 	flags.IntVar(&opts.port, "port", 8889, "")
 	flags.StringVar(&opts.path, "path", "/mcp", "")
+	flags.BoolVar(&opts.allowProjectChange, "allow-project-change", false, "")
 	flags.Var(&opts.debug, "debug", "")
 	flags.StringVar(&opts.logStyle, "log-style", "auto", "")
 
@@ -192,16 +198,21 @@ func run(opts options) error {
 	}
 	client := &gcp.Client{HTTP: &http.Client{Timeout: httpTimeout}, Auth: authorizer}
 
+	instructions := tools.Instructions
+	if opts.allowProjectChange {
+		instructions = tools.ProjectChangeInstructions
+	}
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: serverName, Version: version},
-		&mcp.ServerOptions{Instructions: tools.Instructions, Logger: sdkLogger},
+		&mcp.ServerOptions{Instructions: instructions, Logger: sdkLogger},
 	)
-	toolNames := tools.Register(server, client)
+	toolNames := tools.Register(server, client, opts.allowProjectChange)
 	if opts.interactive {
 		printBanner(opts, authorizer, toolNames)
 	} else {
 		slog.Info("starting server", "version", version, "transport", opts.transport,
 			"authentication", authorizer.Method(), "project", authorizer.Project(),
+			"quota_project", authorizer.QuotaProject(), "allow_project_change", opts.allowProjectChange,
 			"debug", int(opts.debug), "tools", strings.Join(toolNames, ","))
 	}
 
@@ -211,11 +222,16 @@ func run(opts options) error {
 	return serveHTTP(ctx, server, opts, sdkLogger)
 }
 
-// serveHTTP serves server as a stateless Streamable HTTP endpoint until ctx is cancelled.
+// serveHTTP serves server as a Streamable HTTP endpoint until ctx is cancelled. It is stateless
+// unless --allow-project-change needs sessions to hold switched projects.
 func serveHTTP(ctx context.Context, server *mcp.Server, opts options, sdkLogger *slog.Logger) error {
+	streamableOptions := &mcp.StreamableHTTPOptions{Stateless: true, Logger: sdkLogger}
+	if opts.allowProjectChange {
+		streamableOptions = &mcp.StreamableHTTPOptions{SessionTimeout: sessionTimeout, Logger: sdkLogger}
+	}
 	var handler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{Stateless: true, Logger: sdkLogger},
+		streamableOptions,
 	)
 	if opts.debug >= debugRequests {
 		next := handler
@@ -256,6 +272,14 @@ func printBanner(opts options, authorizer gcp.Authorizer, toolNames []string) {
 		clioutput.Info("  Default project: %s", project)
 	} else {
 		clioutput.Warning("  Default project: none; gcp_query_cloud_logging calls must name a scope")
+	}
+	if quotaProject := authorizer.QuotaProject(); quotaProject != "" {
+		clioutput.Info("  Quota project: %s", quotaProject)
+	} else {
+		clioutput.Info("  Quota project: none")
+	}
+	if opts.allowProjectChange {
+		clioutput.Warning("  Project change: allowed per session with gcp_set_project")
 	}
 	if opts.debug > 0 {
 		clioutput.Warning("  Debug: %s", debugDescriptions[int(opts.debug)])

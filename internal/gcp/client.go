@@ -118,6 +118,9 @@ func (c *Client) do(ctx context.Context, method, requestURL string, body, out an
 		} else if err := c.Auth.Authorize(ctx, request); err != nil {
 			return err
 		}
+		if quotaProject := RequestQuotaProject(ctx); quotaProject != "" {
+			request.Header.Set(quotaProjectHeader, quotaProject)
+		}
 
 		response, err := c.HTTP.Do(request)
 		if err != nil {

@@ -18,7 +18,7 @@ spec:
       containers:
         - name: gcp-mcp
           image: {{ .Values.image }}
-          args: ["--port", "{{ .Values.port }}"]
+          args: ["--port", "{{ .Values.port }}"{{ if .Values.allowProjectChange }}, "--allow-project-change"{{ end }}]
           env:
             {{- with .Values.project }}
             - name: GOOGLE_CLOUD_PROJECT

@@ -27,8 +27,9 @@ func (staticAuthorizer) Authorize(_ context.Context, request *http.Request) erro
 	return nil
 }
 
-func (staticAuthorizer) Method() string  { return "static" }
-func (staticAuthorizer) Project() string { return "default-project" }
+func (staticAuthorizer) Method() string       { return "static" }
+func (staticAuthorizer) Project() string      { return "default-project" }
+func (staticAuthorizer) QuotaProject() string { return "quota-project" }
 
 // recorded is one request the fake API received.
 type recorded struct {
@@ -167,6 +168,25 @@ func TestRequestAuthorizationOverride(t *testing.T) {
 	}
 	if got := (*requests)[0]; got.authorization != "Bearer client-token" || got.quotaProject != "" {
 		t.Errorf("headers = %q, %q", got.authorization, got.quotaProject)
+	}
+}
+
+func TestRequestQuotaProjectOverride(t *testing.T) {
+	client, requests := fakeAPI(t, func(w http.ResponseWriter, _ *http.Request, _ string) {
+		io.WriteString(w, `{"name":"projects/1"}`)
+	})
+	ctx := WithQuotaProject(context.Background(), "switched-quota")
+	if _, err := client.Project(ctx, "p"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Project(WithAuthorization(ctx, "Bearer client-token"), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if got := (*requests)[0]; got.authorization != "Bearer server-token" || got.quotaProject != "switched-quota" {
+		t.Errorf("server credential headers = %q, %q", got.authorization, got.quotaProject)
+	}
+	if got := (*requests)[1]; got.authorization != "Bearer client-token" || got.quotaProject != "switched-quota" {
+		t.Errorf("client credential headers = %q, %q", got.authorization, got.quotaProject)
 	}
 }
 

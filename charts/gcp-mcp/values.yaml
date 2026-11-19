@@ -12,6 +12,10 @@ credentialsSecret: ""
 # own project.
 project: ""
 
+# Registers gcp_set_project, which switches the default project and the quota project of the
+# calling MCP session.
+allowProjectChange: false
+
 port: 8889
 
 serviceType: LoadBalancer

@@ -122,6 +122,15 @@ Several projects can be resolved in one call, comma-separated, so a result listi
 them costs one call rather than one per project. A project that cannot be resolved comes back
 carrying an error instead of failing the call, so one bad entry does not cost you the rest.`
 
+const setProjectDescription = `Switch the default project and the quota project of this MCP session, or report them.
+
+The default project is the one gcp_query_cloud_logging searches when a call names no scope. The
+quota project is the project every Google Cloud request of this session is billed and
+rate-limited against; switch it when a result reports a disabled API or exhausted quota in the
+current quota project. The change lasts until the session ends and does not affect other
+sessions. Call with no arguments to see the values in effect and whether each comes from this
+session or from the server's configuration.`
+
 const noScopeMessage = `scope is empty; pass a Cloud Logging resource name such as 'projects/<project-id>'`
 
 const noFilterMessage = `filter_expression must not be empty`
@@ -131,3 +140,5 @@ const noProjectMessage = `project must not be empty; pass a project ID or number
 const noQueryMessage = `query must not be empty; pass e.g. 'policy:<member email>' or 'policy:<role>'`
 
 const parentAndQueryMessage = `pass either parent or query, not both`
+
+const noSessionMessage = `the call belongs to no MCP session, so there is nothing to switch the projects of`

@@ -15,16 +15,18 @@ import (
 	"github.com/skoszewski/gcp-mcp/internal/gcp"
 )
 
-// fixedAuthorizer authorizes every request with a fixed bearer token.
+// fixedAuthorizer authorizes every request with a fixed bearer token and quota project.
 type fixedAuthorizer struct{}
 
 func (fixedAuthorizer) Authorize(_ context.Context, request *http.Request) error {
 	request.Header.Set("Authorization", "Bearer token")
+	request.Header.Set("X-Goog-User-Project", "home-quota")
 	return nil
 }
 
-func (fixedAuthorizer) Method() string  { return "fixed" }
-func (fixedAuthorizer) Project() string { return "home-project" }
+func (fixedAuthorizer) Method() string       { return "fixed" }
+func (fixedAuthorizer) Project() string      { return "home-project" }
+func (fixedAuthorizer) QuotaProject() string { return "home-quota" }
 
 // fakeResponses maps a request's original URL to the status and body the fake API answers with.
 type fakeResponses map[string]struct {
@@ -32,15 +34,30 @@ type fakeResponses map[string]struct {
 	body   string
 }
 
+// fakeAPI is what the fake Google Cloud API received, keyed by the request's original URL.
+type fakeAPI struct {
+	bodies        map[string]string
+	quotaProjects map[string]string
+}
+
 // connect serves the tools against a fake Google Cloud API answering with responses, and returns
 // a client session and the request bodies the API received, keyed by URL.
 func connect(t *testing.T, responses fakeResponses) (*mcp.ClientSession, map[string]string) {
 	t.Helper()
-	bodies := map[string]string{}
+	server, api := newServer(t, responses, false)
+	return connectSession(t, server), api.bodies
+}
+
+// newServer returns an MCP server with the tools registered against a fake Google Cloud API
+// answering with responses, and the record of what that API received.
+func newServer(t *testing.T, responses fakeResponses, allowProjectChange bool) (*mcp.Server, *fakeAPI) {
+	t.Helper()
+	received := &fakeAPI{bodies: map[string]string{}, quotaProjects: map[string]string{}}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		original := r.Header.Get("X-Original-URL")
 		body, _ := io.ReadAll(r.Body)
-		bodies[original] = string(body)
+		received.bodies[original] = string(body)
+		received.quotaProjects[original] = r.Header.Get("X-Goog-User-Project")
 		response, found := responses[original]
 		if !found {
 			w.WriteHeader(http.StatusNotFound)
@@ -60,7 +77,13 @@ func connect(t *testing.T, responses fakeResponses) (*mcp.ClientSession, map[str
 	})
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
-	Register(server, &gcp.Client{HTTP: &http.Client{Transport: transport}, Auth: fixedAuthorizer{}})
+	Register(server, &gcp.Client{HTTP: &http.Client{Transport: transport}, Auth: fixedAuthorizer{}}, allowProjectChange)
+	return server, received
+}
+
+// connectSession connects a new client session to server.
+func connectSession(t *testing.T, server *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
@@ -71,7 +94,7 @@ func connect(t *testing.T, responses fakeResponses) (*mcp.ClientSession, map[str
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { session.Close() })
-	return session, bodies
+	return session
 }
 
 type roundTripper func(*http.Request) (*http.Response, error)
@@ -361,5 +384,62 @@ func TestHierarchyListTools(t *testing.T) {
 	}
 	if text := call(t, session, "gcp_list_projects", map[string]any{"parent": "folders/7", "query": "x"}, true); text != parentAndQueryMessage {
 		t.Errorf("parent and query error = %q", text)
+	}
+}
+
+func TestSetProjectRegistration(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		server, _ := newServer(t, fakeResponses{}, allow)
+		result, err := connectSession(t, server).ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, tool := range result.Tools {
+			found = found || tool.Name == "gcp_set_project"
+		}
+		if found != allow {
+			t.Errorf("allowProjectChange %v: gcp_set_project registered = %v", allow, found)
+		}
+	}
+}
+
+func TestSetProject(t *testing.T) {
+	const entriesURL = "https://logging.googleapis.com/v2/entries:list"
+	server, api := newServer(t, fakeResponses{
+		entriesURL: {200, `{}`},
+		"https://cloudresourcemanager.googleapis.com/v3/projects/42": {200, `{"name":"projects/42","projectId":"other-project"}`},
+	}, true)
+	session := connectSession(t, server)
+	other := connectSession(t, server)
+
+	want := `{"default_project":{"source":"server","value":"home-project"},"quota_project":{"source":"server","value":"home-quota"}}`
+	if got := call(t, session, "gcp_set_project", nil, false); got != want {
+		t.Errorf("report = %s", got)
+	}
+
+	got := call(t, session, "gcp_set_project", map[string]any{"project": "42", "quota_project": "projects/billing"}, false)
+	want = `{"default_project":{"source":"session","value":"other-project"},"quota_project":{"source":"session","value":"billing"}}`
+	if got != want {
+		t.Errorf("switch = %s", got)
+	}
+	call(t, session, "gcp_query_cloud_logging", map[string]any{"filter_expression": "x"}, false)
+	if body := api.bodies[entriesURL]; !strings.Contains(body, `"resourceNames":["projects/other-project"]`) || api.quotaProjects[entriesURL] != "billing" {
+		t.Errorf("switched session request = %s, quota project %q", body, api.quotaProjects[entriesURL])
+	}
+
+	call(t, other, "gcp_query_cloud_logging", map[string]any{"filter_expression": "x"}, false)
+	if body := api.bodies[entriesURL]; !strings.Contains(body, `"resourceNames":["projects/home-project"]`) || api.quotaProjects[entriesURL] != "home-quota" {
+		t.Errorf("other session request = %s, quota project %q", body, api.quotaProjects[entriesURL])
+	}
+
+	call(t, session, "gcp_set_project", map[string]any{"project": "missing"}, true)
+	if got := call(t, session, "gcp_set_project", nil, false); !strings.Contains(got, `"value":"other-project"`) {
+		t.Errorf("after a failed switch = %s", got)
+	}
+	got = call(t, session, "gcp_set_project", map[string]any{"reset": true, "quota_project": "billing-2"}, false)
+	want = `{"default_project":{"source":"server","value":"home-project"},"quota_project":{"source":"session","value":"billing-2"}}`
+	if got != want {
+		t.Errorf("reset = %s", got)
 	}
 }

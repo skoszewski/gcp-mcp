@@ -29,5 +29,13 @@ request for something that identity cannot see fails. When a result says permiss
 or that something does not exist although its name is right, tell the user this server cannot
 reach it rather than looking for a way around it or answering from guesswork.`
 
+const instructionsProjectChange = `gcp_set_project switches this session's default project and quota project. Switch the default
+project when the investigation moves to another project's logs, and the quota project when a
+result reports that an API is disabled or out of quota in the current one; the switch does not
+grant access the identity lacks.`
+
 // Instructions are the server instructions sent to the client at initialize.
 const Instructions = instructionsOverview + "\n\n" + instructionsAccess
+
+// ProjectChangeInstructions are the server instructions when gcp_set_project is registered.
+const ProjectChangeInstructions = Instructions + "\n\n" + instructionsProjectChange
